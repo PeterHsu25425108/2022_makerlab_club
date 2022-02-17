@@ -17,6 +17,8 @@ boolean checkCollision(int x1, int y1, int width1, int height1, int x2, int y2, 
 #define joy_x A7
 #define joy_y A6
 #define joy_sw A3
+#define start A2
+#define select A1
 
 #define TS_CS 7
 
@@ -42,6 +44,7 @@ int playerLives = 50;
 int playerScore = 0;
 int gameState = 1; // 1=start 2=playing 3=gameover
 int level;
+bool mute = false;
 
 int16_t tftWidth = tft.width(), tftHeight = tft.height();
 
@@ -119,10 +122,16 @@ TS_Point p;
 int16_t x1,y1,x2,y2;
 
 tft.fillScreen(ILI9341_BLACK);
+tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
+tft.setTextSize(2);
+tft.println("CALIBRATING");
+tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+36);
+tft.println("Touch +");
+
 // wait for no touch
 while(ts.touched());
-tft.drawFastHLine(10,20,20,ILI9341_RED);
-tft.drawFastVLine(20,10,20,ILI9341_RED);
+tft.drawFastHLine(10,20,20,ILI9341_WHITE);
+tft.drawFastVLine(20,10,20,ILI9341_WHITE);
 while(!ts.touched());
 p = ts.getPoint();
 x1 = p.x;
@@ -131,8 +140,8 @@ tft.drawFastHLine(10,20,20,ILI9341_BLACK);
 tft.drawFastVLine(20,10,20,ILI9341_BLACK);
 delay(500);
 while(ts.touched());
-tft.drawFastHLine(tftWidth - 30,tftHeight - 20,20,ILI9341_RED);
-tft.drawFastVLine(tftWidth - 20,tftHeight - 30,20,ILI9341_RED);
+tft.drawFastHLine(tftWidth - 30,tftHeight - 20,20,ILI9341_WHITE);
+tft.drawFastVLine(tftWidth - 20,tftHeight - 30,20,ILI9341_WHITE);
 while(!ts.touched());
 p = ts.getPoint();
 x2 = p.x;
@@ -159,6 +168,7 @@ Serial.print("xCalM = ");Serial.print(xCalM);
 Serial.print(", xCalC = ");Serial.print(xCalC);
 Serial.print("yCalM = ");Serial.print(yCalM);
 Serial.print(", yCalC = ");Serial.println(yCalC);
+tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,60,ILI9341_BLACK);
 
 }
 
@@ -174,7 +184,9 @@ digitalWrite(TFT_CS, HIGH);
 
 pinMode(joy_x,INPUT);
 pinMode(joy_y,INPUT);
-pinMode(joy_sw,INPUT);
+pinMode(joy_sw,INPUT_PULLUP);
+pinMode(start,INPUT_PULLUP);
+pinMode(select,INPUT_PULLUP);
 
 tft.begin();
 tft.setRotation(ROTATION);
@@ -322,11 +334,27 @@ tft.print(level + 1);
 }
 
 void newBall(){
-xPos = 0;
+int xl[2] = {0, tft.width()-15};
+randomSeed(millis());
+int idx =random(0,2);
+Serial.print("random");//need debugging
+Serial.println(idx);
+xPos = xl[idx];
 yPos = 90;
 xVel = yVel = 2;
+//delay(10);
+tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_GREEN);
+long lastFrame = millis();
+while(digitalRead(start))
+{
+  while((millis() - lastFrame) < 10);
+  lastFrame = millis();
+  moveBat();
+}
+  
+tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_BLACK);
 moveBall(xPos,yPos,xVel,yVel,xPosLast,yPosLast);
-delay(1000);
+//delay(1000);
 }
 
 boolean checkBallLost(){
@@ -348,11 +376,11 @@ void moveBat(){
 int16_t newBatX;
 //ScreenPoint sp = ScreenPoint(0,0);
 double joy_input=getJoy();
-Serial.println(joy_input);
+//Serial.println(joy_input);
 if (abs(joy_input)>0) {
 //TS_Point p = ts.getPoint();
 //sp = getScreenCoords(p.x, p.y);
-  int max_deltaX = 3.5;
+  double max_deltaX = 3;
   newBatX = batX + getJoy()*max_deltaX/360.0;
   if (newBatX < 0)
     newBatX = 0;
@@ -396,6 +424,8 @@ float xInc;
 boolean hit = checkCollision(batX, batY, batWidth, batHeight, (int)round(xPos)-ballSize, (int)round(yPos), ballSize*2, ballSize);
 if (hit) {
 // reverse ball y direction but increase speed
+if(!mute)
+  tone(buzzerin,200,70);
 yVel += 0.001;
 if (yVel > 2){
 yVel = 2;
@@ -422,7 +452,8 @@ int row, col;
 for (row=0; row<5/*&lt;5*/; row++){
 for (col=0; col<16/*&lt;16*/; col++){
 if (blocks[row][col].isActive && blocks[row][col].isHit(xPos,yPos, ballSize*2,ballSize*2)){
-tone(buzzerin,1500,70);
+if(!mute)
+  tone(buzzerin,1500,70);
 //delay();
 blocks[row][col].removeBlock();
 playerScore += blocks[row][col].score;
@@ -485,11 +516,15 @@ case 2: // play
 /*Serial.print(xPos);
 Serial.print(" ");
 Serial.println(yPos);*/
+if(!digitalRead(select))
+  mute = !mute;
 moveBall(xPos,yPos,xVel,yVel,xPosLast,yPosLast);
 moveBat();
 checkHitBat();
 checkHitBlock();
 if (checkBallLost()){
+//tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_BLACK);
+tft.fillCircle(round(xPosLast), round(yPosLast), ballSize, ILI9341_BLACK);
 playerLives --;
 drawLives();
 if (playerLives > 0){
