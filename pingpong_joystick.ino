@@ -172,6 +172,7 @@ tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,60,ILI9341_BLACK);
 
 }
 
+void joyCali();
 
 void setup() {
 Serial.begin(9600);
@@ -195,8 +196,8 @@ tftWidth = tft.width();
 tftHeight = tft.height();
 ts.begin();
 ts.setRotation(ROTATION);
-calibrateTouchScreen();
-
+//calibrateTouchScreen();
+joyCali();
 batY = tftHeight - batHeight -30;
 }
 
@@ -366,22 +367,204 @@ return false;
 }
 }
 
-double getJoy()
+double joyCen[2];
+double joyExt[2][2] = {{1,1},{1,1}};
+double joyOrien[2];
+void joyCali(/*double xValMax, double yValMax*/)
 {
-  double x = analogRead(joy_x)-503.0;
-  return -x;
+  tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Centering...");
+  //Centering
+  double* xl[500];
+  double* yl[500];
+  double x_cen = 0;
+  double y_cen = 0;
+  for(int i=0;i<500;i++)
+  {
+    x_cen += analogRead(joy_x);
+    y_cen += analogRead(joy_y);
+  }
+  x_cen /= 500;
+  y_cen /= 500;
+  double* val = new double [2];
+  joyCen[0] = x_cen;
+  joyCen[1] = y_cen;
+  Serial.println("centering done");
+  delay(200);
+  tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,40,ILI9341_BLACK);
+
+  double* x;
+  double* y;
+  int count=0;
+  bool pass_origin=false;
+
+  int x_line,y_line;
+  tft.setCursor((tftWidth/2)-100/*-25*/,(tftHeight/2)-20+36);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Rotate The Joystick");
+  
+  while((fabs(analogRead(joy_y)-y_cen)<200)||(fabs(analogRead(joy_x)-x_cen)<200))
+  {
+    double ti = -3*M_PI/4;
+    for(int i=0; i<=100; i++)
+    {
+      x_line = tftWidth/2 + round(50*cos(ti-(1.5*M_PI-ti)*i/100.0));
+      y_line = tftHeight/2-50 + round(50*sin(ti-(1.5*M_PI-ti)*i/100.0));
+      tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLUE);
+
+      if(!((fabs(analogRead(joy_y)-y_cen)<200)||(fabs(analogRead(joy_x)-x_cen)<200)))
+      {
+        tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLACK);
+        break;
+      }
+      
+      if((i==100)||(i==0))
+      {
+        delay(500);
+      }
+      else
+      {
+        delay(3);
+      }
+      tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLACK);
+    }
+  }
+
+  tft.fillScreen(ILI9341_BLACK);
+  
+  tft.setCursor((tftWidth/2)-100+20/*-25*/,(tftHeight/2)-20+12);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Calibrating...");
+  
+  Serial.println("Calibrating...");
+
+  //orientation
+  joyOrien[0] = (analogRead(joy_x)-x_cen<0) ? 1 : -1;
+  joyOrien[1] = (analogRead(joy_y)-y_cen>0) ? 1 : -1;
+  
+  Serial.print("result: ");
+  for(int i=0;i<2;i++)
+  {
+    Serial.print(joyOrien[i]);
+    Serial.print(" ");
+  }
+  Serial.println("");
+  Serial.println("orientation done");
+  
+  //scaling
+  double old_t;
+  old_t = 1;
+  double a,b;
+  a = b = 0;
+  Serial.println("Start rolling");
+  do
+  {
+    double a = analogRead(joy_x)-x_cen;
+    a *= joyOrien[0];
+    double b = analogRead(joy_y)-y_cen;
+    b *= joyOrien[1];
+    old_t = atan2(b,a);
+    Serial.print(a);
+    Serial.print(" ");
+    Serial.println(b);
+    Serial.println(old_t);
+    //delay(500);
+  }while((old_t>0)/*||(fabs(a)<200)||(fabs(b)<200)*/);
+  Serial.println("Start sampling");
+
+  bool first_Angle = true;
+  bool sampling = true;
+  while(sampling)
+  {
+    double newX = analogRead(joy_x)-x_cen;
+    double newY = analogRead(joy_y)-y_cen;
+    newX *= joyOrien[0];
+    newY *= joyOrien[1];
+    double t = atan2(newY,newX);
+
+    Serial.print(newX);
+    Serial.print(" ");
+    Serial.println(newY);
+    Serial.print("old angle: ");
+    Serial.println(old_t*180.0/M_PI);
+    Serial.print("angle: ");
+    Serial.println(t*180.0/M_PI);
+    Serial.print("first angle: ");
+    Serial.println(first_Angle);
+    //delay(300);
+
+    if((!first_Angle)&&(old_t>=0)&&(t<0))
+    {
+      sampling = false;
+      Serial.println("End point");
+      continue;
+    }
+
+    if(first_Angle)
+      first_Angle = false;
+
+    if(newX>joyExt[0][0])
+      joyExt[0][0] = /*xValMax/*/newX;
+    if(newX<joyExt[0][1])
+      joyExt[0][1] = /*xValMax/*/newX;
+    if(newY>joyExt[1][0])
+      joyExt[1][0] = /*yValMax/*/newY;
+    if(newY<joyExt[1][1])
+      joyExt[1][1] = /*yValMax/*/newY;
+    old_t = t;
+  }
+  for(int i=0;i<2;i++)
+  {
+    for(int j=0;j<2;j++)
+    {
+      Serial.print(joyExt[i][j]);
+      Serial.print(" ");
+    }
+  }
+  Serial.println("");
+  Serial.println("sampling done");
+  tft.fillRect((tftWidth/2)-100-30,(tftHeight/2)-20,280,40,ILI9341_BLACK);
+}
+
+double getJoy(double max_deltaX)
+{
+  double x = analogRead(joy_x)-joyCen[0];
+  x *= joyOrien[0];
+  x *= max_deltaX/((x>0) ? joyExt[0][0] : -joyExt[0][1]);
+  return x;
+}
+
+bool prevSelect = true;
+bool selectPressed()
+{
+  bool val = digitalRead(select);
+  
+  if(prevSelect&&(!val))
+  {
+    prevSelect = val;
+    return true;
+  }
+  else
+  {
+    prevSelect = val;
+    return false;
+  }
 }
 
 void moveBat(){
 int16_t newBatX;
+double max_deltaX = 3;
 //ScreenPoint sp = ScreenPoint(0,0);
-double joy_input=getJoy();
+double joy_input=getJoy(max_deltaX);
 //Serial.println(joy_input);
-if (abs(joy_input)>0) {
+if (fabs(joy_input)>0) {
 //TS_Point p = ts.getPoint();
 //sp = getScreenCoords(p.x, p.y);
-  double max_deltaX = 3;
-  newBatX = batX + getJoy()*max_deltaX/360.0;
+  newBatX = batX + joy_input;
   if (newBatX < 0)
     newBatX = 0;
   if (newBatX >= (tftWidth - batWidth))
@@ -502,21 +685,21 @@ gameState = 12;
 break;
 
 case 12: // wait for click to play
-if (ts.touched()) {
+/*if (ts.touched()!digitalRead(start)) {
 TS_Point p = ts.getPoint();
-ScreenPoint sp = getScreenCoords(p.x, p.y);
-if (checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)){
+ScreenPoint sp = getScreenCoords(p.x, p.y);*/
+if (!digitalRead(start)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
 initGame();
 gameState = 2;
 }
-}
+//}
 break;
 
 case 2: // play
 /*Serial.print(xPos);
 Serial.print(" ");
 Serial.println(yPos);*/
-if(!digitalRead(select))
+if(selectPressed())
   mute = !mute;
 moveBall(xPos,yPos,xVel,yVel,xPosLast,yPosLast);
 moveBat();
@@ -530,7 +713,7 @@ drawLives();
 if (playerLives > 0){
 newBall();
 xVel=1;
-yVel=1;
+yVel=1 + 0.7*(level);
 }
 else {
 gameState = 3; // end game
@@ -560,8 +743,4 @@ tft.print(playerScore);
 gameState = 11; // click to play
 break;
 }
-
-
-
-
 }
