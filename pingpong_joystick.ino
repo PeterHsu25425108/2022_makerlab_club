@@ -19,6 +19,7 @@ boolean checkCollision(int x1, int y1, int width1, int height1, int x2, int y2, 
 #define joy_sw A3
 #define start A2
 #define select A1
+#define LED 5
 
 #define TS_CS 7
 
@@ -177,6 +178,7 @@ void joyCali();
 void setup() {
 Serial.begin(9600);
 pinMode(buzzerin,OUTPUT);
+pinMode(LED,OUTPUT);
 // avoid chip select contention
 pinMode(TS_CS, OUTPUT);
 digitalWrite(TS_CS, HIGH);
@@ -346,8 +348,14 @@ xVel = yVel = 2;
 //delay(10);
 tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_GREEN);
 long lastFrame = millis();
-while(digitalRead(start))
+while(digitalRead(joy_sw))
 {
+  if(selectPressed())
+    mute = !mute;
+  if(!mute)
+    digitalWrite(LED,HIGH);
+  else
+    digitalWrite(LED,LOW);
   while((millis() - lastFrame) < 10);
   lastFrame = millis();
   moveBat();
@@ -670,6 +678,14 @@ void loop(void) {
 while((millis() - lastFrame) < 10);
 lastFrame = millis();
 
+if(selectPressed())
+  mute = !mute;
+
+if(!mute)
+  digitalWrite(LED,HIGH);
+else
+  digitalWrite(LED,LOW);
+
 switch(gameState){
 case 1: // start
 gameState = 11;
@@ -680,7 +696,7 @@ tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,40,ILI9341_GREEN);
 tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
 tft.setTextSize(2);
 tft.setTextColor(ILI9341_WHITE);
-tft.print("CLICK TO PLAY");
+tft.print("Press \"start\"");
 gameState = 12;
 break;
 
@@ -688,7 +704,7 @@ case 12: // wait for click to play
 /*if (ts.touched()!digitalRead(start)) {
 TS_Point p = ts.getPoint();
 ScreenPoint sp = getScreenCoords(p.x, p.y);*/
-if (!digitalRead(start)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
+if (!digitalRead(joy_sw)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
 initGame();
 gameState = 2;
 }
