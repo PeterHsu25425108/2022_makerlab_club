@@ -187,7 +187,7 @@ digitalWrite(TFT_CS, HIGH);
 
 pinMode(joy_x,INPUT);
 pinMode(joy_y,INPUT);
-pinMode(joy_sw,INPUT_PULLUP);
+pinMode(start,INPUT_PULLUP);
 pinMode(start,INPUT_PULLUP);
 pinMode(select,INPUT_PULLUP);
 
@@ -348,7 +348,7 @@ xVel = yVel = 2;
 //delay(10);
 tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_GREEN);
 long lastFrame = millis();
-while(digitalRead(joy_sw))
+while(digitalRead(start))
 {
   if(selectPressed())
     mute = !mute;
@@ -704,7 +704,7 @@ case 12: // wait for click to play
 /*if (ts.touched()!digitalRead(start)) {
 TS_Point p = ts.getPoint();
 ScreenPoint sp = getScreenCoords(p.x, p.y);*/
-if (!digitalRead(joy_sw)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
+if (!digitalRead(start)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
 initGame();
 gameState = 2;
 }
