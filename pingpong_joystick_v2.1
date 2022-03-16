@@ -1,0 +1,819 @@
+#include "Arduino.h"
+#include "SPI.h"
+#include "Adafruit_GFX.h"
+#include "Adafruit_ILI9341.h"
+#include "XPT2046_Touchscreen.h"
+#include "Math.h"
+
+#define DEBUG false // use/ignore the code of debug message
+/* NANO's PIN-assigment */
+// For the Adafruit shield, these are the default.
+#define TFT_RST 8
+#define TFT_DC 9
+#define TFT_CS 10
+#define TFT_MOSI 11
+#define TFT_MISO 12
+#define TFT_CLK 13
+// Joystick & Buttons & Others
+#define JOY_X_PIN A7
+#define JOY_Y_PIN A6
+#define JOY_SW_PIN A3
+#define START_PIN A2
+#define SELECT_PIN A1
+#define LED_PIN 5
+#define BUZZER_PIN 6
+//Touch screen
+#define TS_CS 7
+/* Coordinate  */
+#define ROTATION 3 
+#define VelocityFunc(level) (1 + 0.7*level)
+#define maxLives 50
+
+/* Variables & Objects */
+// Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC/RST
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+// Ball
+// float xPos = 0.0, yPos = 0.0;
+// float xPosLast = 0.0, yPosLast = 0.0;
+// float xVel = 0.0, yVel = 0.0;
+int xPos = 0.0, yPos = 0.0;
+int xPosLast = 0.0, yPosLast = 0.0;
+int xVel = 0.0, yVel = 0.0;
+int8_t ballSize = 3;
+// Bat
+int16_t batX = 0, batY = 0;
+int16_t batXLast = 0, batYLast = 0;
+int16_t batWidth = 30;
+int16_t batHeight = 3;
+// player's info data
+int8_t playerLives = maxLives;
+int32_t playerScore = 0;
+int8_t playerLevel = 0;
+// JoyStick 
+double joy_cx = 0.0, joy_cy = 0.0;
+double joyExt[2][2] = {{1,1},{1,1}};
+double joyOrien[2];
+// Block
+class Block {
+public:
+    int16_t x;
+    int16_t y;
+    int16_t width;
+    int16_t height;
+    int16_t colour;
+    int score;
+    boolean isActive;
+
+    void setBlock(int bx, int by, int bwidth, int bheight, int bcol, int bscore){
+        x = bx;
+        y = by;
+        width = bwidth;
+        height = bheight;
+        colour = bcol;
+        score = bscore;
+        isActive = true;
+    }
+    void drawBlock(){
+        tft.fillRect(x, y, width, height, colour);
+    }
+    void removeBlock(){
+        tft.fillRect(x, y, width, height, ILI9341_BLACK);
+        isActive = false;
+    }
+};
+Block blocks[5][16];
+// Others
+boolean mute = false;   //state mute mode
+boolean pre_sel = true; //control mute mode
+int16_t tftWidth;
+int16_t tftHeight;
+const int16_t topBorder = 20;           //the height of infoboard
+
+
+/* Function Declarations */
+// Init func
+void initInfoBoard();
+void initGameBoard();
+// Game info
+void drawScore();
+void drawLifes();
+void drawLevel();
+// Ball func
+void moveBall();
+void drawBall();
+void newBall();
+// Bat func
+void moveBat();
+void drawBat();
+// Collision func
+int checkCollision();
+boolean checkAllBlocksHit();
+// 
+void joyCali();
+
+void initInfoBoard()
+{
+    /* init & draw info board */
+    playerLives = maxLives;
+    playerScore = 0;
+    playerLevel = 0;
+    tft.drawFastHLine(0, topBorder-1, tftWidth, ILI9341_BLUE);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(0, 5);
+    tft.print("SCORE :");
+    tft.setCursor(tftWidth/2, 5);
+    tft.print("LIVES :");
+    tft.setCursor(tftWidth-75, 5);
+    tft.print("LEVEL :");
+    drawLives();
+    drawScore();
+    drawLevel();
+}
+void initGameBoard()
+{
+    /* init & draw game board */
+    int row, col;
+    int colour, score;
+    // init Ball
+    tft.fillCircle(round(xPosLast), round(yPosLast), ballSize, ILI9341_BLACK);// remove ball
+    xPosLast = xPos = 0;
+    yPosLast = yPos = 90;
+    xVel = 1;
+    yVel = 1 + 0.7*(playerLevel);
+    tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_GREEN);
+    // init Bat
+    tft.fillRect(batX, batY, batWidth, batHeight, ILI9341_BLACK);
+    batX = (tftWidth - batWidth) / 2;
+    batY = tftHeight - batHeight - 30;
+    tft.fillRect(batX, batY, batWidth, batHeight, ILI9341_RED);
+    // init Block
+    for(row=0; row<5; row++){
+        for (col=0; col<16; col++){
+            if(row==0 || row==1) colour=ILI9341_BLUE   , score=50;
+            else if(row==2 || row==3) colour=ILI9341_MAGENTA, score=30;
+            else if(row==4 || row==5) colour=ILI9341_YELLOW , score=10;
+            blocks[row][col].setBlock(col*20, row*10+30, 19, 9, colour, score);
+            blocks[row][col].drawBlock();
+        }
+    }
+}
+void drawScore(){
+    // clear old score
+    tft.fillRect(50, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor(50, 5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(playerScore);
+    #if (DEBUG)
+    Serial.print("playerScore: ");
+    Serial.println(playerScore);
+    #endif
+}
+void drawLives(){
+    // clear old lives
+    tft.fillRect((tftWidth/2)+50, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor((tftWidth/2)+50, 5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(playerLives);
+    #if (DEBUG)
+    Serial.print("playerLives: ");
+    Serial.println(playerLives);
+    #endif
+}
+void drawLevel(){
+    // clear old level
+    tft.fillRect(tftWidth-25, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor(tftWidth-25,5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(playerLevel + 1);
+    #if (DEBUG)
+    Serial.print("playerLevel: ");
+    Serial.println(playerLevel);
+    #endif
+}
+
+
+void moveBall()
+{
+    // limit ball speed
+    if(xVel >  2) xVel = 2;
+    if(xVel < -2) xVel = -2;
+    if(yVel >  2) yVel = 2;
+    if(yVel < -2) yVel = -2;
+    // move ball
+    xPos += xVel;
+    yPos += yVel;
+    #if (DEBUG)
+    Serial.print("xPos: ");
+    Serial.print(xPos);
+    Serial.print(" ");
+    Serial.print("yPos: ");
+    Serial.print(yPos);
+
+    Serial.print("xVel: ");
+    Serial.print(xVel);
+    Serial.print(" ");
+    Serial.print("yVel: ");
+    Serial.println(yVel);
+    #endif
+}
+void drawBall()
+{
+    tft.fillCircle(xPosLast, yPosLast, ballSize, ILI9341_BLACK);
+    tft.fillCircle(xPos, yPos, ballSize, ILI9341_GREEN);
+    xPosLast = xPos;
+    yPosLast = yPos;
+}
+void newBall()
+{
+    int idx;
+    randomSeed(millis());
+    xPos = ((idx=random()%2) ? 0 : tftWidth - 15);
+    yPos = 90;
+    // xVel = yVel = 2;
+    // xVel = random()%2+1;
+    xVel = 0;
+    yVel = -VelocityFunc(playerLevel);
+    #if(DEBUG)
+    Serial.print("random");//need debugging
+    Serial.println(idx);
+    #endif
+}
+
+
+/*void joyCali() {
+  tft.setCursor((tftWidth / 2) - 100 + 25, (tftHeight / 2) - 20 + 12);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Centering...");
+  //Centering
+  double * xl[500];
+  double * yl[500];
+  double x_cen = 0;
+  double y_cen = 0;
+  for (int i = 0; i < 500; i++) {
+    x_cen += analogRead(JOY_X_PIN);
+    y_cen += analogRead(JOY_Y_PIN);
+  }
+  x_cen /= 500;
+  y_cen /= 500;
+  double * val = new double[2];
+  joy_cx = x_cen;
+  joy_cy = y_cen;
+  Serial.println("centering done");
+  delay(200);
+  tft.fillRect((tftWidth / 2) - 100, (tftHeight / 2) - 20, 200, 40, ILI9341_BLACK);
+
+  double * x;
+  double * y;
+  int count = 0;
+  bool pass_origin = false;
+
+  int x_line, y_line;
+  tft.setCursor((tftWidth / 2) - 100, (tftHeight / 2) - 20 + 36);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Rotate The Joystick");
+
+  while ((fabs(analogRead(JOY_Y_PIN) - y_cen) < 200) || (fabs(analogRead(JOY_X_PIN) - x_cen) < 200)) {
+    double ti = -3 * M_PI / 4;
+    for (int i = 0; i <= 100; i++) {
+      x_line = tftWidth / 2 + round(50 * cos(ti - (1.5 * M_PI - ti) * i / 100.0));
+      y_line = tftHeight / 2 - 50 + round(50 * sin(ti - (1.5 * M_PI - ti) * i / 100.0));
+      tft.drawLine(tftWidth / 2, tftHeight / 2 - 50, x_line, y_line, ILI9341_BLUE);
+
+      if (!((fabs(analogRead(JOY_Y_PIN) - y_cen) < 200) || (fabs(analogRead(JOY_X_PIN) - x_cen) < 200))) {
+        tft.drawLine(tftWidth / 2, tftHeight / 2 - 50, x_line, y_line, ILI9341_BLACK);
+        break;
+      }
+
+      if ((i == 100) || (i == 0)) {
+        delay(500);
+      } else {
+        delay(3);
+      }
+      tft.drawLine(tftWidth / 2, tftHeight / 2 - 50, x_line, y_line, ILI9341_BLACK);
+    }
+  }
+
+  tft.fillScreen(ILI9341_BLACK);
+
+  tft.setCursor((tftWidth / 2) - 100 + 20, (tftHeight / 2) - 20 + 12);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Calibrating...");
+
+  Serial.println("Calibrating...");
+
+  //orientation
+  joyOrien[0] = (analogRead(JOY_X_PIN) - x_cen < 0) ? 1 : -1;
+  joyOrien[1] = (analogRead(JOY_Y_PIN) - y_cen > 0) ? 1 : -1;
+
+  Serial.print("result: ");
+  for (int i = 0; i < 2; i++) {
+    Serial.print(joyOrien[i]);
+    Serial.print(" ");
+  }
+  Serial.println("");
+  Serial.println("orientation done");
+
+  //scaling
+  double old_t;
+  old_t = 1;
+  double a, b;
+  a = b = 0;
+  Serial.println("Start rolling");
+  do {
+    double a = analogRead(JOY_X_PIN) - x_cen;
+    a *= joyOrien[0];
+    double b = analogRead(JOY_Y_PIN) - y_cen;
+    b *= joyOrien[1];
+    old_t = atan2(b, a);
+    Serial.print(a);
+    Serial.print(" ");
+    Serial.println(b);
+    Serial.println(old_t);
+  } while ((old_t > 0));
+  Serial.println("Start sampling");
+
+  bool first_Angle = true;
+  bool sampling = true;
+  while (sampling) {
+    double newX = analogRead(JOY_X_PIN) - x_cen;
+    double newY = analogRead(JOY_Y_PIN) - y_cen;
+    newX *= joyOrien[0];
+    newY *= joyOrien[1];
+    double t = atan2(newY, newX);
+
+    Serial.print(newX);
+    Serial.print(" ");
+    Serial.println(newY);
+    Serial.print("old angle: ");
+    Serial.println(old_t * 180.0 / M_PI);
+    Serial.print("angle: ");
+    Serial.println(t * 180.0 / M_PI);
+    Serial.print("first angle: ");
+    Serial.println(first_Angle);
+
+    if ((!first_Angle) && (old_t >= 0) && (t < 0)) {
+      sampling = false;
+      Serial.println("End point");
+      continue;
+    }
+
+    if (first_Angle)
+      first_Angle = false;
+
+    if (newX > joyExt[0][0])
+      joyExt[0][0] = newX;
+    if (newX < joyExt[0][1])
+      joyExt[0][1] = newX;
+    if (newY > joyExt[1][0])
+      joyExt[1][0] = newY;
+    if (newY < joyExt[1][1])
+      joyExt[1][1] = newY;
+    old_t = t;
+  }
+  for (int i = 0; i < 2; i++) {
+    for (int j = 0; j < 2; j++) {
+      Serial.print(joyExt[i][j]);
+      Serial.print(" ");
+    }
+  }
+  Serial.println("");
+  Serial.println("sampling done");
+  tft.fillRect((tftWidth / 2) - 100 - 30, (tftHeight / 2) - 20, 280, 40, ILI9341_BLACK);
+}*/
+
+void joyCali() {
+  tft.setCursor((tftWidth / 2) - 100 + 25, (tftHeight / 2) - 20 + 12);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.print("Centering...");
+  
+  //Centering
+  double * xl[500];
+  double * yl[500];
+  double x_cen = 0;
+  double y_cen = 0;
+  for (int i = 0; i < 500; i++) {
+    x_cen += analogRead(JOY_X_PIN);
+    y_cen += analogRead(JOY_Y_PIN);
+  }
+  x_cen /= 500;
+  y_cen /= 500;
+  double * val = new double[2];
+  joy_cx = x_cen;
+  joy_cy = y_cen;
+  Serial.println("centering done");
+  delay(200);
+  tft.fillRect((tftWidth / 2) - 100, (tftHeight / 2) - 20, 200, 40, ILI9341_BLACK);
+
+  //up
+  tft.setCursor((tftWidth / 2) - 50, (tftHeight / 2) + 16+20);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.println("Push the ");
+  tft.setCursor((tftWidth / 2) - 100, (tftHeight / 2) + 72);
+  tft.print("joystick upwards");
+  tft.drawLine((tftWidth / 2), (tftHeight / 2) + 10, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) + 30, (tftHeight / 2) - 50, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) - 30, (tftHeight / 2) - 50, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_YELLOW);
+
+  double err,a,b;
+  do
+  {
+    a = analogRead(JOY_Y_PIN);
+    delay(10);
+    b = analogRead(JOY_Y_PIN);
+    err = (1-fabs(a/b))*100;
+  }while((err>=5)||(fabs(analogRead(JOY_Y_PIN)-joy_cy) < 200));
+  while(fabs(analogRead(JOY_Y_PIN) - joy_cy) > 200);
+  joyOrien[1] = (b-joy_cy > 0) ? 1 : -1;
+  joyExt[1][0] = (b-joy_cy)*joyOrien[1];
+  Serial.print("y+: ");
+  Serial.println(joyExt[1][0]);
+  tft.drawLine((tftWidth / 2) + 30, (tftHeight / 2) - 50, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_BLACK);
+  tft.drawLine((tftWidth / 2) - 30, (tftHeight / 2) - 50, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_BLACK);
+
+  //down
+  tft.fillRect((tftWidth / 2), (tftHeight / 2) + 72, 200, 40, ILI9341_BLACK);
+  tft.setCursor((tftWidth / 2) + 10, (tftHeight / 2) + 72);
+  tft.print("downwards");
+  tft.drawLine((tftWidth / 2) + 30, (tftHeight / 2) - 20, (tftWidth / 2),(tftHeight / 2) + 10, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) - 30, (tftHeight / 2) - 20, (tftWidth / 2),(tftHeight / 2) + 10, ILI9341_YELLOW);
+  do
+  {
+    a = analogRead(JOY_Y_PIN);
+    delay(10);
+    b = analogRead(JOY_Y_PIN);
+    err = (1-fabs(a/b))*100;
+  }while((err>=5)||(fabs(analogRead(JOY_Y_PIN)-joy_cy) < 200));
+  while(fabs(analogRead(JOY_Y_PIN) - joy_cy) > 200);
+  joyExt[1][1] = (b-joy_cy)*joyOrien[1];
+  Serial.print("y-: ");
+  Serial.println(joyExt[1][1]);
+  tft.drawLine((tftWidth / 2), (tftHeight / 2) + 10, (tftWidth / 2),(tftHeight / 2) - 80, ILI9341_BLACK);
+  tft.drawLine((tftWidth / 2) + 30, (tftHeight / 2) - 20, (tftWidth / 2),(tftHeight / 2) + 10, ILI9341_BLACK);
+  tft.drawLine((tftWidth / 2) - 30, (tftHeight / 2) - 20, (tftWidth / 2),(tftHeight / 2) + 10, ILI9341_BLACK);
+
+  //left
+  tft.fillRect((tftWidth / 2), (tftHeight / 2) + 72, 200, 40, ILI9341_BLACK);
+  tft.setCursor((tftWidth / 2) + 10, (tftHeight / 2) + 72);
+  tft.print("leftward");
+  tft.drawLine((tftWidth / 2)+50, (tftHeight / 2) - 35, (tftWidth / 2)-50, (tftHeight / 2) - 35, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) - 20 , (tftHeight / 2) - 35 + 30, (tftWidth / 2) - 50,(tftHeight / 2) - 35, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) - 20 , (tftHeight / 2) - 35 - 30, (tftWidth / 2) - 50,(tftHeight / 2) - 35, ILI9341_YELLOW);
+  do
+  {
+    a = analogRead(JOY_X_PIN);
+    delay(10);
+    b = analogRead(JOY_X_PIN);
+    err = (1-fabs(a/b))*100;
+  }while((err>=5)||(fabs(analogRead(JOY_X_PIN)-joy_cx) < 200));
+  while(fabs(analogRead(JOY_X_PIN) - joy_cx) > 200);
+  joyOrien[0] = ((b-joy_cx < 0) ? 1 : -1);
+  joyExt[0][1] = (b-joy_cx)*joyOrien[0];
+  Serial.print("x-: ");
+  Serial.println(joyExt[0][1]);
+  tft.drawLine((tftWidth / 2) - 20 , (tftHeight / 2) - 35 + 30, (tftWidth / 2) - 50,(tftHeight / 2) - 35, ILI9341_BLACK);
+  tft.drawLine((tftWidth / 2) - 20 , (tftHeight / 2) - 35 - 30, (tftWidth / 2) - 50,(tftHeight / 2) - 35, ILI9341_BLACK);
+
+  //right
+  tft.fillRect((tftWidth / 2), (tftHeight / 2) + 72, 200, 40, ILI9341_BLACK);
+  tft.setCursor((tftWidth / 2) + 10, (tftHeight / 2) + 72);
+  tft.print("rightward");
+  //tft.drawLine((tftWidth / 2)+50, (tftHeight / 2) - 35, (tftWidth / 2)-50, (tftHeight / 2) - 35, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) + 20 , (tftHeight / 2) - 35 + 30, (tftWidth / 2) + 50,(tftHeight / 2) - 35, ILI9341_YELLOW);
+  tft.drawLine((tftWidth / 2) + 20 , (tftHeight / 2) - 35 - 30, (tftWidth / 2) + 50,(tftHeight / 2) - 35, ILI9341_YELLOW);
+  do
+  {
+    a = analogRead(JOY_X_PIN);
+    delay(10);
+    b = analogRead(JOY_X_PIN);
+    err = (1-fabs(a/b))*100;
+  }while((err>=5)||(fabs(analogRead(JOY_X_PIN)-joy_cx) < 200));
+  while(fabs(analogRead(JOY_X_PIN) - joy_cx) > 200);
+  joyExt[0][0] = (b-joy_cx)*joyOrien[0];
+  Serial.print("x+: ");
+  Serial.println(joyExt[0][0]);
+  tft.fillScreen(ILI9341_BLACK);
+}
+
+double getJoy_x(double max_deltaX) {
+  double x = analogRead(JOY_X_PIN) - joy_cx;
+  x *= joyOrien[0];
+  x *= max_deltaX / ((x > 0) ? joyExt[0][0] : -joyExt[0][1]);
+  return x;
+}
+
+double getJoy_y(double max_deltaY) {
+  double y = analogRead(JOY_Y_PIN) - joy_cy;
+  y *= joyOrien[1];
+  y *= max_deltaY / ((y > 0) ? joyExt[1][0] : -joyExt[1][1]);
+  return y;
+}
+
+double getJoy(double max_deltaX) {
+  double x = analogRead(JOY_X_PIN) - joy_cx;
+  x *= joyOrien[0];
+  x *= max_deltaX / ((x > 0) ? joyExt[0][0] : -joyExt[0][1]);
+  return x;
+}
+boolean selectPressed(boolean& pre_sel)
+{
+    boolean now_sel = digitalRead(SELECT_PIN);
+    if(pre_sel && (!now_sel)){ // falling
+        pre_sel = now_sel;
+        return true;
+    }
+    else{
+        pre_sel = now_sel;
+        return false;
+    }
+}
+
+void moveBat() {
+  int16_t newBatX;
+  double max_deltaX = 3;
+  double joy_input = getJoy(max_deltaX);
+  if (fabs(joy_input) > 0) {
+    newBatX = batX + joy_input;
+    if (newBatX < 0)
+      newBatX = 0;
+    if (newBatX >= (tftWidth - batWidth))
+      newBatX = tftWidth - 1 - batWidth;
+  }
+
+  if (abs(newBatX - batX) > 1) {
+    tft.fillRect(batX, batY, batWidth, batHeight, ILI9341_BLACK);
+    batX = newBatX;
+    tft.fillRect(batX, batY, batWidth, batHeight, ILI9341_RED);
+  }
+}
+void drawBat()
+{
+    // if (abs(batX - batXLast) > 1){
+        tft.fillRect(batXLast, batYLast, batWidth, batHeight,ILI9341_BLACK);
+        batXLast = batX;
+        tft.fillRect(batX, batY, batWidth, batHeight,ILI9341_RED);
+    // }
+}
+
+int checkCollision()
+{
+    // bounding box collision detection
+    /* hit bound */
+    if (xPos < (float)ballSize){ // hit right bound
+        xPos = (float)ballSize;
+        xVel = -xVel;
+        return 0;
+    }
+    if (xPos > (float)(tftWidth - ballSize - 1)){ // hit left bound
+        xPos = (float)(tftWidth - ballSize - 1);
+        xVel = -xVel;
+        return 0;
+    }
+    if (yPos < topBorder + (float)ballSize + 2){ // hit the upper bound
+        yPos = topBorder + (float)ballSize + 2;
+        yVel = -yVel;
+        return 0;
+    }
+    if (yPos > (float)(tftHeight - ballSize)){ // hit the lower bound (Lost one life)
+        yPos = (float)(tftHeight - ballSize);
+        xVel = 0; 
+        yVel = 0;
+        playerLives--;
+        drawLives();
+        return 1;
+    }
+
+    /* hit Bat */
+    // 1. Can modify ball direction/speed  
+    // 2. Here just hit bat or not, can check it more detail
+    //    (ex: hit bat upper/lower/right/left bound)
+    if( (xPos > batX - ballSize) && (xPos < batX + batWidth + ballSize) &&
+        (yPos > batY - ballSize) && (yPos < batY + batHeight + ballSize) )
+    {
+        if(!mute)
+            tone(BUZZER_PIN, 200, 70);
+        yPos = (float)(batY - ballSize -1);
+        xVel += 2.0 * (xPos - batX + (batWidth / 2.0)) / batWidth; // use hit position increase xVel
+        yVel = -(yVel + 0.001); // increase yVel
+        return 2;
+    }
+
+    /* hit Block */
+    // 1. Here check all blocks each time, can use other efficient method
+    // 2. Here just hit block or not, can check it more detail
+    //    (ex: hit block upper/lower/right/left bound) 
+    int row, col;
+    int dis_x,dis_y;
+    int limit_dis = (blocks[0][0].width/2)*(blocks[0][0].width/2) + (blocks[0][0].height/2)*(blocks[0][0].height/2);
+
+    for(row=0 ; row<5 ; row++)
+    {
+        for(col=0 ; col<16 ; col++)
+        {
+            if (blocks[row][col].isActive)
+            {
+                // // 1.
+                // dis_x = (xPos - blocks[row][col].x + blocks[row][col].width /2) * (xPos - blocks[row][col].x + blocks[row][col].width /2);
+                // dis_y = (yPos - blocks[row][col].y + blocks[row][col].height/2) * (yPos - blocks[row][col].y + blocks[row][col].height/2);
+                // if(dis_x+dis_y > limit_dis)
+                //     continue;
+                // // 2.
+                // if( (xPos > blocks[row][col].x - 2*ballSize) && (xPos < blocks[row][col].x + blocks[row][col].width + 2*ballSize) &&
+                //     (yPos > blocks[row][col].y - 2*ballSize) && (yPos < blocks[row][col].y + blocks[row][col].height+ 2*ballSize) )
+                // {
+                //     if(!mute)
+                //         tone(BUZZER_PIN, 1500, 70);
+                //     blocks[row][col].removeBlock(); // because of number and area, remove it here
+                //     playerScore += blocks[row][col].score;
+                //     drawScore();
+                //     yVel = -yVel;
+                // }
+                // 3.
+                if( (xPos > blocks[row][col].x - 2*ballSize) && (xPos < blocks[row][col].x) &&
+                    (yPos > blocks[row][col].y) && (yPos < blocks[row][col].y + blocks[row][col].height) )
+                {
+                    if(!mute)
+                        tone(BUZZER_PIN, 1500, 70);
+                    xPos = blocks[row][col].x - ballSize;
+                    blocks[row][col].removeBlock(); // because of number and area, remove it here
+                    playerScore += blocks[row][col].score;
+                    drawScore();
+                    xVel = -xVel;
+                }
+                if( (xPos > blocks[row][col].x + blocks[row][col].width) && (xPos < blocks[row][col].x + blocks[row][col].width + 2*ballSize) &&
+                    (yPos > blocks[row][col].y) && (yPos < blocks[row][col].y + blocks[row][col].height) )
+                {
+                    if(!mute)
+                        tone(BUZZER_PIN, 1500, 70);
+                    xPos = blocks[row][col].x + blocks[row][col].width + ballSize;
+                    blocks[row][col].removeBlock(); // because of number and area, remove it here
+                    playerScore += blocks[row][col].score;
+                    drawScore();
+                    xVel = -xVel;
+                }
+                if( (xPos > blocks[row][col].x) && (xPos < blocks[row][col].x + blocks[row][col].width) &&
+                    (yPos > blocks[row][col].y - 2*ballSize) && (yPos < blocks[row][col].y) )
+                {
+                    if(!mute)
+                        tone(BUZZER_PIN, 1500, 70);
+                    yPos = blocks[row][col].y - ballSize;
+                    blocks[row][col].removeBlock(); // because of number and area, remove it here
+                    playerScore += blocks[row][col].score;
+                    drawScore();
+                    yVel = -yVel;
+                }
+                if( (xPos > blocks[row][col].x) && (xPos < blocks[row][col].x + blocks[row][col].width) &&
+                    (yPos > blocks[row][col].y + blocks[row][col].height) && (yPos < blocks[row][col].y + blocks[row][col].height + 2*ballSize) )
+                {
+                    if(!mute)
+                        tone(BUZZER_PIN, 1500, 70);
+                    yPos = blocks[row][col].y + blocks[row][col].height +  ballSize;
+                    blocks[row][col].removeBlock(); // because of number and area, remove it here
+                    playerScore += blocks[row][col].score;
+                    drawScore();
+                    yVel = -yVel;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+boolean checkAllBlocksHit(){
+    int row, col;
+    for (row=0 ; row<5 ; row++){
+        for (col=0 ; col<16 ; col++){
+            if (blocks[row][col].isActive){
+                return false;
+            }
+        }
+    }
+    return true; 
+}
+
+
+void setup() {
+    Serial.begin(9600);
+    /* I/O SETTING */
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
+    // avoid chip select contention
+    pinMode(TS_CS , OUTPUT); digitalWrite(TS_CS , HIGH);
+    pinMode(TFT_CS, OUTPUT); digitalWrite(TFT_CS, HIGH);
+
+    pinMode(JOY_X_PIN, INPUT);
+    pinMode(JOY_Y_PIN, INPUT);
+    pinMode(START_PIN , INPUT_PULLUP);
+    pinMode(SELECT_PIN, INPUT_PULLUP);
+
+    tft.begin();
+    tft.setRotation(ROTATION);
+    tft.fillScreen(ILI9341_BLACK);
+    tftWidth = tft.width();
+    tftHeight = tft.height();
+    
+    joyCali();
+}
+
+/* GAME STATE */
+#define STATE_INFO 1
+#define STATE_INIT 2
+#define STATE_WAIT_START 3
+#define STATE_RELEASE_BALL 4
+#define STATE_MOVE_BALL 5
+#define STATE_RELOAD 6
+#define STATE_END 7
+int gameState = STATE_INFO; // 1=start 2=playing 3=gameover
+unsigned long lastFrame = millis();
+int collision;
+
+void loop(void) {
+    /* Limit frame rate */
+    while((millis() - lastFrame) < 10);// limit FPS<100
+    lastFrame = millis();
+
+    /* Buzzer & LED control */
+    if(selectPressed(pre_sel)) //mute mode
+        mute = !mute;
+    if(!mute)
+        digitalWrite(LED_PIN, HIGH);
+    else
+        digitalWrite(LED_PIN, LOW);
+    
+    /* Game STATE */
+    switch(gameState){
+    case STATE_INFO: // show "start" on tft & wait player press "start"
+        tft.fillScreen(ILI9341_BLACK);
+        tft.fillRect ((tftWidth/2)-100, (tftHeight/2)-20, 200, 40, ILI9341_GREEN);
+        tft.setCursor((tftWidth/2)-100+25, (tftHeight/2)-20+12);
+        tft.setTextSize(2);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print("Press \"start\"");
+        gameState = STATE_INIT;
+        break;
+    case STATE_INIT: //
+       if (!digitalRead(START_PIN)){
+            tft.fillScreen(ILI9341_BLACK);
+            initInfoBoard();
+            initGameBoard();
+            gameState = STATE_RELEASE_BALL;
+        }
+        break;
+    case STATE_RELEASE_BALL:
+        if (!digitalRead(START_PIN)){
+            gameState = STATE_MOVE_BALL;
+        }
+        moveBat();
+        drawBat(); 
+        break;
+    case STATE_MOVE_BALL:
+        // moveBall();
+        // moveBat();
+        collision = checkCollision();
+        if(collision == 1){
+            if(playerLives > 0){
+                newBall();
+                gameState = STATE_RELEASE_BALL;
+            }else{
+                gameState = STATE_END;
+            }
+        }
+        if(checkAllBlocksHit()){
+            gameState = STATE_RELOAD;
+        }
+        moveBall();
+        moveBat();
+        drawBall();
+        drawBat();
+        break;
+    case STATE_RELOAD: // new blocks
+        delay(1000);
+        playerLevel++;
+        drawLevel();
+        initGameBoard();
+        gameState = STATE_RELEASE_BALL;
+        break;
+
+    case STATE_END: // end
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setCursor((tftWidth/2)-150,50);
+        tft.setTextSize(3);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print("You Scored ");
+        tft.print(playerScore);
+        while(digitalRead(START_PIN));
+        gameState = STATE_INFO; // click start to play
+        break;
+    }
+}
