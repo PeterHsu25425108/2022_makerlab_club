@@ -1,762 +1,645 @@
+#include "Arduino.h"
 #include "SPI.h"
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
-#include "XPT2046_Touchscreen.h"
-#include "Math.h"
+// #include "XPT2046_Touchscreen.h"
+// #include "Math.h"
 
-// function declarations
-boolean checkCollision(int x1, int y1, int width1, int height1, int x2, int y2, int width2, int height2);
-
+#define DEBUG false // use/ignore the code of debug message
+/* NANO's PIN-assigment */
 // For the Adafruit shield, these are the default.
-#define TFT_CS 10
-#define TFT_DC 9
-#define TFT_MOSI 11
-#define TFT_CLK 13
 #define TFT_RST 8
+#define TFT_DC 9
+#define TFT_CS 10
+#define TFT_MOSI 11
 #define TFT_MISO 12
-#define joy_x A7
-#define joy_y A6
-#define joy_sw A3
-#define start A2
-#define select A1
-#define LED 5
-
+#define TFT_CLK 13
+// Joystick & Buttons & Others
+#define JOY_X_PIN A7
+#define JOY_Y_PIN A6
+#define JOY_SW_PIN A3
+#define START_PIN A2
+#define SELECT_PIN A1
+#define LED_PIN 5
+#define BUZZER_PIN 6
+//Touch screen
 #define TS_CS 7
+/* Coordinate  */
+#define ROTATION 3 
+#define VelocityFunc(level) (1 + 0.7*level)
 
-#define ROTATION 3/*(0,0) is at the upper right corner
-                    The same orientation as the joystick*/
-#define buzzerin 6
-
+/* Variables & Objects */
 // Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC/RST
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
-XPT2046_Touchscreen ts(TS_CS);
-
-float xCalM = 0.0, yCalM = 0.0;
-float xCalC = 0.0, yCalC = 0.0;
-float xPos = 0.0, yPos = 0.0;
-float xPosLast = 0.0, yPosLast = 0.0;
-float xVel = 0.0, yVel = 0.0;
-int8_t topBorder = 20;
-int8_t batWidth = 30;
-int8_t batHeight = 3;
-int16_t batX = 0, batY = 0;
-int8_t ballSize = 3;
-int playerLives = 50;
-int playerScore = 0;
-int gameState = 1; // 1=start 2=playing 3=gameover
-int level;
-bool mute = false;
-
-int16_t tftWidth = tft.width(), tftHeight = tft.height();
-
-class ScreenPoint {
-public:
-int16_t x;
-int16_t y;
-
-ScreenPoint(){
-// default contructor
-}
-
-ScreenPoint(int16_t xIn, int16_t yIn){
-x = xIn;
-y = yIn;
-}
+// Ball
+struct Ball
+{
+    int16_t cur_x, cur_y;
+    int16_t old_x, old_y;
+    double vel_x, vel_y;
+    int8_t radius = 3;
 };
-
+// Bat
+struct Bat
+{
+    int16_t cur_x, cur_y;
+    int16_t old_x, old_y;
+    int8_t vel_x;
+    int8_t width = 30;
+    int8_t height = 3;
+};
+struct Player
+{
+    int8_t lives = 50;
+    int8_t level = 0;
+    int32_t score = 0;
+};
+// JoyStick
+struct JoyStick
+{
+    int32_t cen_x, cen_y;
+    int32_t right_x, left_x;
+    int32_t upper_y, lower_y;
+};
+// Block
 class Block {
 public:
-int x;
-int y;
-int width;
-int height;
-int colour;
-int score;
-boolean isActive;
+    int16_t x, y;
+    int16_t width;
+    int16_t height;
+    int16_t colour;
+    int16_t score;
+    boolean isActive;
 
-// default constructor
-Block(){}
-
-Block(int xpos, int ypos, int bwidth, int bheight, int bcol, int bscore){
-x = xpos;
-y = ypos;
-width = bwidth;
-height = bheight;
-colour = bcol;
-score = bscore;
-isActive = true;
-drawBlock();
-}
-
-void drawBlock(){
-tft.fillRect(x,y,width,height,colour);
-}
-
-void removeBlock(){
-tft.fillRect(x,y,width,height,ILI9341_BLACK);
-isActive = false;
-}
-
-boolean isHit(float x1,float y1, int w1,int h1){
-if (checkCollision((int)round(x1),(int)round(y1),w1,h1,x,y,width,height)){
-return true;
-}
-else {
-return false;
-}
-}
+    void setBlock(int bx, int by, int bwidth, int bheight, int bcol, int bscore){
+        x = bx;
+        y = by;
+        width = bwidth;
+        height = bheight;
+        colour = bcol;
+        score = bscore;
+        isActive = true;
+    }
+    void drawBlock(){
+        tft.fillRect(x, y, width, height, colour);
+    }
+    void removeBlock(){
+        tft.fillRect(x, y, width, height, ILI9341_BLACK);
+        isActive = false;
+    }
 };
-Block blocks[5][16];
-
-ScreenPoint getScreenCoords(int16_t x, int16_t y){
-int16_t xCoord = round((x * xCalM) + xCalC);
-int16_t yCoord = round((y * yCalM) + yCalC);
-if(xCoord < 0) xCoord = 0;
-if(xCoord >= tftWidth) xCoord = tftWidth - 1;
-if(yCoord < 0) yCoord = 0;
-if(yCoord >= tftHeight) yCoord = tftHeight - 1;
-return(ScreenPoint(xCoord, yCoord));
-}
-
-void calibrateTouchScreen(){
-TS_Point p;
-int16_t x1,y1,x2,y2;
-
-tft.fillScreen(ILI9341_BLACK);
-tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
-tft.setTextSize(2);
-tft.println("CALIBRATING");
-tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+36);
-tft.println("Touch +");
-
-// wait for no touch
-while(ts.touched());
-tft.drawFastHLine(10,20,20,ILI9341_WHITE);
-tft.drawFastVLine(20,10,20,ILI9341_WHITE);
-while(!ts.touched());
-p = ts.getPoint();
-x1 = p.x;
-y1 = p.y;
-tft.drawFastHLine(10,20,20,ILI9341_BLACK);
-tft.drawFastVLine(20,10,20,ILI9341_BLACK);
-delay(500);
-while(ts.touched());
-tft.drawFastHLine(tftWidth - 30,tftHeight - 20,20,ILI9341_WHITE);
-tft.drawFastVLine(tftWidth - 20,tftHeight - 30,20,ILI9341_WHITE);
-while(!ts.touched());
-p = ts.getPoint();
-x2 = p.x;
-y2 = p.y;
-tft.drawFastHLine(tftWidth - 30,tftHeight - 20,20,ILI9341_BLACK);
-tft.drawFastVLine(tftWidth - 20,tftHeight - 30,20,ILI9341_BLACK);
-
-int16_t xDist = tftWidth - 40;
-int16_t yDist = tftHeight - 40;
-
-// translate in form pos = m x val + c
-// x
-xCalM = (float)xDist / (float)(x2 - x1);
-xCalC = 20.0 - ((float)x1 * xCalM);
-// y
-yCalM = (float)yDist / (float)(y2 - y1);
-yCalC = 20.0 - ((float)y1 * yCalM);
-
-Serial.print("x1 = ");Serial.print(x1);
-Serial.print(", y1 = ");Serial.print(y1);
-Serial.print("x2 = ");Serial.print(x2);
-Serial.print(", y2 = ");Serial.println(y2);
-Serial.print("xCalM = ");Serial.print(xCalM);
-Serial.print(", xCalC = ");Serial.print(xCalC);
-Serial.print("yCalM = ");Serial.print(yCalM);
-Serial.print(", yCalC = ");Serial.println(yCalC);
-tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,60,ILI9341_BLACK);
-
-}
-
+/* Function Declarations */
+// Init func
+void initInfoBoard();
+void initGameBoard();
+// Game info
+void drawScore();
+void drawLifes();
+void drawLevel();
+// Ball func
+void moveBall();
+void drawBall();
+void newBall();
+// Bat func
+void moveBat();
+void drawBat();
+// Collision func
+int checkCollision();
+boolean checkAllBlocksHit();
+// JoyStick
 void joyCali();
 
-void setup() {
-Serial.begin(9600);
-pinMode(buzzerin,OUTPUT);
-pinMode(LED,OUTPUT);
-// avoid chip select contention
-pinMode(TS_CS, OUTPUT);
-digitalWrite(TS_CS, HIGH);
-pinMode(TFT_CS, OUTPUT);
-digitalWrite(TFT_CS, HIGH);
+/* Data and Objects*/
+Ball ball;
+Bat bat;
+Player player;
+Block blocks[5][16];
+JoyStick joystick;
+// Others
+boolean mute = false;   //state mute mode
+boolean pre_sel = true; //control mute mode
+int16_t tftWidth;   //TFT width = 320
+int16_t tftHeight;  //TFT height = 240
+const int16_t topBorder = 20;           //the height of infoboard
 
-pinMode(joy_x,INPUT);
-pinMode(joy_y,INPUT);
-pinMode(start,INPUT_PULLUP);
-pinMode(start,INPUT_PULLUP);
-pinMode(select,INPUT_PULLUP);
-
-tft.begin();
-tft.setRotation(ROTATION);
-tft.fillScreen(ILI9341_BLACK);
-tftWidth = tft.width();
-tftHeight = tft.height();
-ts.begin();
-ts.setRotation(ROTATION);
-//calibrateTouchScreen();
-joyCali();
-batY = tftHeight - batHeight -30;
+void initInfoBoard()
+{
+    /* init & draw info board */
+    player.lives = 50;
+    player.score = 0;
+    player.level = 0;
+    tft.drawFastHLine(0, topBorder-1, tftWidth, ILI9341_BLUE);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(0, 5);
+    tft.print(F("SCORE :"));
+    tft.setCursor(tftWidth/2, 5);
+    tft.print(F("LIVES :"));
+    tft.setCursor(tftWidth-75, 5);
+    tft.print(F("LEVEL :"));
+    drawLives();
+    drawScore();
+    drawLevel();
 }
+void initGameBoard()
+{
+    /* init & draw game board */
+    int colour, score;
+    // init Ball
+    ball.cur_x = ball.radius + 1;
+    ball.cur_y = 90;
+    tft.fillCircle(ball.old_x, ball.old_y, ball.radius, ILI9341_BLACK);// remove ball
+    tft.fillCircle(ball.cur_x, ball.cur_y, ball.radius, ILI9341_GREEN);
+    ball.old_x = ball.cur_x;
+    ball.old_y = ball.cur_y;
+    ball.vel_x = 1;
+    ball.vel_y = VelocityFunc(player.level);
+    // init Bat
+    bat.cur_x = (tftWidth - bat.width) / 2;
+    bat.cur_y = (tftHeight - bat.height) - 30;
+    tft.fillRect(bat.old_x, bat.old_y, bat.width, bat.height, ILI9341_BLACK);
+    tft.fillRect(bat.cur_x, bat.cur_y, bat.width, bat.height, ILI9341_RED);
+    bat.old_x = bat.cur_x;
+    bat.old_y = bat.cur_y;
 
-void initGame(){
-
-tft.fillScreen(ILI9341_BLACK);
-tft.drawFastHLine(0, topBorder-1, tftWidth, ILI9341_BLUE);
-tft.setCursor(0,5);
-tft.setTextSize(1);
-tft.setTextColor(ILI9341_WHITE);
-tft.print("SCORE :");
-tft.setCursor((tftWidth/2), 5);
-tft.print("LIVES :");
-tft.setCursor(tftWidth - 75, 5);
-tft.print("LEVEL :");
-
-batY = tftHeight - batHeight -30;
-playerLives = 50;
-playerScore = 0;
-level = 0;
-
-drawLives();
-drawScore();
-drawLevel();
-
-initGameBoard();
-
+    // init Block
+    for(int8_t row=0; row<5; row++){
+        for (int8_t col=0; col<16; col++){
+            if(row==0 || row==1) colour=ILI9341_BLUE   , score=50;
+            else if(row==2 || row==3) colour=ILI9341_MAGENTA, score=30;
+            else if(row==4 || row==5) colour=ILI9341_YELLOW , score=10;
+            blocks[row][col].setBlock(col*20, row*10+30, 19, 9, colour, score);
+            blocks[row][col].drawBlock();
+        }
+    }
 }
-
-void initGameBoard() {
-int row, col;
-int colour, score;
-clearOldBallPos();
-xPosLast = xPos = 0;
-yPosLast = yPos = 90;
-xVel = 1;
-yVel = 1 + 0.7*(level);
-gameState = 2;
-
-for(row=0; row < 5; row++){
-for (col=0; col < 16; col++){
-switch(row){
-case 0:
-case 1:
-colour = ILI9341_BLUE;
-score = 50;
-break;
-case 2:
-case 3:
-colour = ILI9341_MAGENTA;
-score = 30;
-break;
-case 4:
-case 5:
-colour = ILI9341_YELLOW;
-score = 10;
-break;
-}
-blocks[row][col] = Block(col*20, (row*10) + 30, 19, 9,colour,score);
-}
-}
-
-}
-
-void clearOldBallPos(){
-tft.fillCircle(round(xPosLast), round(yPosLast), ballSize, ILI9341_BLACK);
-}
-
-void moveBall(float &xPos, float &yPos, float &xVel, float &yVel,float &xPosLast,float &yPosLast){
-float newX, newY;
-newX = xPos + xVel;
-newY = yPos + yVel;
-if (newX < (float)ballSize){
-newX = (float)ballSize;
-xVel = -xVel;
-}
-if (newX > (float)(tftWidth - ballSize - 1)){
-newX = (float)(tftWidth - ballSize - 1);
-xVel = -xVel;
-}
-if (newY < topBorder + (float)ballSize){
-newY = topBorder + (float)ballSize;
-yVel = -yVel;
-}
-if ((round(newX) != round(xPosLast)) && (round(newY) != round(yPosLast))){
-// draw ball
-clearOldBallPos();
-tft.fillCircle(round(newX), round(newY), ballSize, ILI9341_GREEN);
-xPosLast = newX;
-yPosLast = newY;
-}
-xPos = newX;
-yPos = newY;
-/*Serial.print("x: ");
-Serial.print(xPos);
-Serial.print(" ");
-Serial.print("y: ");
-Serial.print(yPos);
-
-Serial.print("xVel: ");
-Serial.print(xVel);
-Serial.print(" ");
-Serial.print("yVel: ");
-Serial.println(yVel);*/
-}
-
 void drawScore(){
-// clear old score
-tft.fillRect(50,5,25,10,ILI9341_BLACK);
-// print new score
-tft.setCursor(50,5);
-tft.setTextSize(1);
-tft.setTextColor(ILI9341_WHITE);
-tft.print(playerScore);
+    // clear old score
+    tft.fillRect(50, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor(50, 5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(player.score);
+    #if (DEBUG)
+    Serial.print("Score: ");
+    Serial.println(player.score);
+    #endif
 }
-
 void drawLives(){
-// clear old lives
-tft.fillRect((tftWidth/2)+50,5,25,10,ILI9341_BLACK);
-// print new score
-tft.setCursor((tftWidth/2)+50,5);
-tft.setTextSize(1);
-tft.setTextColor(ILI9341_WHITE);
-tft.print(playerLives);
+    // clear old lives
+    tft.fillRect((tftWidth/2)+50, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor((tftWidth/2)+50, 5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(player.lives);
+    #if (DEBUG)
+    Serial.print("Lives: ");
+    Serial.println(player.lives);
+    #endif
 }
-
 void drawLevel(){
-// clear old level
-tft.fillRect(tftWidth-25,5,25,10,ILI9341_BLACK);
-// print new score
-tft.setCursor(tftWidth-25,5);
-tft.setTextSize(1);
-tft.setTextColor(ILI9341_WHITE);
-tft.print(level + 1);
+    // clear old level
+    tft.fillRect(tftWidth-25, 5, 25, 10, ILI9341_BLACK);
+    // print new score
+    tft.setCursor(tftWidth-25,5);
+    tft.setTextSize(1);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(player.level + 1);
+    #if (DEBUG)
+    Serial.print("Level: ");
+    Serial.println(player.level);
+    #endif
 }
 
-void newBall(){
-int xl[2] = {0, tft.width()-15};
-randomSeed(millis());
-int idx =random(0,2);
-Serial.print("random");//need debugging
-Serial.println(idx);
-xPos = xl[idx];
-yPos = 90;
-xVel = yVel = 2;
-//delay(10);
-tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_GREEN);
-long lastFrame = millis();
-while(digitalRead(start))
+
+void moveBall()
 {
-  if(selectPressed())
-    mute = !mute;
-  if(!mute)
-    digitalWrite(LED,HIGH);
-  else
-    digitalWrite(LED,LOW);
-  while((millis() - lastFrame) < 10);
-  lastFrame = millis();
-  moveBat();
-}
-  
-tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_BLACK);
-moveBall(xPos,yPos,xVel,yVel,xPosLast,yPosLast);
-//delay(1000);
-}
+    // limit ball speed
+    if(ball.vel_x >  2) ball.vel_x = 2;
+    if(ball.vel_x < -2) ball.vel_x = -2;
+    if(ball.vel_y >  2) ball.vel_y = 2;
+    if(ball.vel_y < -2) ball.vel_y = -2;
+    // move ball
+    ball.cur_x += (int16_t)ball.vel_x;
+    ball.cur_y += (int16_t)ball.vel_y;
+    #if (DEBUG)
+    Serial.print("xPos: ");
+    Serial.print(ball.cur_x);
+    Serial.print(" yPos: ");
+    Serial.print(ball.cur_y);
 
-boolean checkBallLost(){
-if (yPos > tftHeight + ballSize){
-return true;
+    Serial.print("ball.vel_x: ");
+    Serial.print(ball.vel_x);
+    Serial.print(" ball.vel_y: ");
+    Serial.println(ball.vel_y);
+    #endif
 }
-else {
-return false;
-}
-}
-
-double joyCen[2];
-double joyExt[2][2] = {{1,1},{1,1}};
-double joyOrien[2];
-void joyCali(/*double xValMax, double yValMax*/)
+void drawBall()
 {
-  tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
-  tft.setTextSize(2);
-  tft.setTextColor(ILI9341_WHITE);
-  tft.print("Centering...");
-  //Centering
-  double* xl[500];
-  double* yl[500];
-  double x_cen = 0;
-  double y_cen = 0;
-  for(int i=0;i<500;i++)
-  {
-    x_cen += analogRead(joy_x);
-    y_cen += analogRead(joy_y);
-  }
-  x_cen /= 500;
-  y_cen /= 500;
-  double* val = new double [2];
-  joyCen[0] = x_cen;
-  joyCen[1] = y_cen;
-  Serial.println("centering done");
-  delay(200);
-  tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,40,ILI9341_BLACK);
+    tft.fillCircle(ball.old_x, ball.old_y, ball.radius, ILI9341_BLACK);
+    tft.fillCircle(ball.cur_x, ball.cur_y, ball.radius, ILI9341_GREEN);
+    ball.old_x = ball.cur_x;
+    ball.old_y = ball.cur_y;
+}
+void newBall()
+{
+    int idx;
+    randomSeed(millis());
+    ball.cur_x = ((idx=random()%2) ? 0 : tftWidth - 15);
+    ball.cur_y = 90;
+    ball.vel_x = 0;
+    ball.vel_y = -VelocityFunc(player.level);
+    #if(DEBUG)
+    Serial.print("random");//need debugging
+    Serial.println(idx);
+    #endif
+}
 
-  double* x;
-  double* y;
-  int count=0;
-  bool pass_origin=false;
+void joyCali()
+{
+    // 1. You can use the data you have get.
+    joystick.cen_x = 501;
+    joystick.cen_y = 519;
+    joystick.right_x = 0;
+    joystick.left_x = 1021;
+    joystick.upper_y = 0;
+    joystick.lower_y = 1021;
 
-  int x_line,y_line;
-  tft.setCursor((tftWidth/2)-100/*-25*/,(tftHeight/2)-20+36);
-  tft.setTextSize(2);
-  tft.setTextColor(ILI9341_WHITE);
-  tft.print("Rotate The Joystick");
-  
-  while((fabs(analogRead(joy_y)-y_cen)<200)||(fabs(analogRead(joy_x)-x_cen)<200))
-  {
-    double ti = -3*M_PI/4;
-    for(int i=0; i<=100; i++)
-    {
-      x_line = tftWidth/2 + round(50*cos(ti-(1.5*M_PI-ti)*i/100.0));
-      y_line = tftHeight/2-50 + round(50*sin(ti-(1.5*M_PI-ti)*i/100.0));
-      tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLUE);
+    // 2 Or you can use the following program to get the data.
+    // Center X and Y
+    joystick.cen_x = 0;
+    joystick.cen_y = 0;
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(tftWidth / 2 - 100 + 25, tftHeight / 2 - 20 + 12);
+    tft.print(F("Center"));
+    while(digitalRead(START_PIN));
+    for(int16_t i=0 ; i<500 ; i++){
+        joystick.cen_x += analogRead(JOY_X_PIN);
+        joystick.cen_y += analogRead(JOY_Y_PIN);
+        if(i==125 || i==250 || i==375){
+            tft.print(F("."));
+            delay(500);
+        }
 
-      if(!((fabs(analogRead(joy_y)-y_cen)<200)||(fabs(analogRead(joy_x)-x_cen)<200)))
-      {
-        tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLACK);
-        break;
-      }
-      
-      if((i==100)||(i==0))
-      {
-        delay(500);
-      }
-      else
-      {
-        delay(3);
-      }
-      tft.drawLine(tftWidth/2,tftHeight/2-50,x_line,y_line,ILI9341_BLACK);
     }
+    joystick.cen_x /= 500;
+    joystick.cen_y /= 500;
+    tft.setTextColor(ILI9341_DARKGREEN);
+    tft.print(F("Done"));
+    delay(1000);
+    tft.fillRect(tftWidth / 2 - 100, tftHeight / 2 - 20, 200, 40, ILI9341_BLACK);
+
+    // Right_X ( X~= 0)
+    joystick.right_x = 0;
+    tft.setCursor(tftWidth / 2 - 100 + 25, tftHeight / 2 - 20 + 12);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(F("Right X"));
+    while(digitalRead(START_PIN));
+    for(int16_t i=0 ; i<500 ; i++){
+        joystick.right_x += analogRead(JOY_X_PIN);
+        if(i==125 || i==250 || i==375){
+            tft.print(F("."));
+            delay(500);
+        }
+    }
+    joystick.right_x /= 500;
+    tft.setTextColor(ILI9341_DARKGREEN);
+    tft.print(F("Done"));
+    delay(1000);
+    tft.fillRect(tftWidth / 2 - 100, tftHeight / 2 - 20, 200, 40, ILI9341_BLACK);
+
+    // Left_X
+    joystick.left_x = 0;
+    tft.setCursor(tftWidth / 2 - 100 + 25, tftHeight / 2 - 20 + 12);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(F("Left X"));
+    while(digitalRead(START_PIN));
+    for(int16_t i=0 ; i<500 ; i++){
+        joystick.left_x += analogRead(JOY_X_PIN);
+        if(i==125 || i==250 || i==375){
+            tft.print(F("."));
+            delay(500);
+        }
+    }
+    joystick.left_x /= 500;
+    tft.setTextColor(ILI9341_DARKGREEN);
+    tft.print(F("Done"));
+    delay(1000);
+    tft.fillRect(tftWidth / 2 - 100, tftHeight / 2 - 20, 200, 40, ILI9341_BLACK);
+
+    // Upper_Y
+    joystick.upper_y = 0;
+    tft.setCursor(tftWidth / 2 - 100 + 25, tftHeight / 2 - 20 + 12);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(F("Upper Y"));
+    while(digitalRead(START_PIN));
+    for(int16_t i=0 ; i<500 ; i++){
+        joystick.upper_y += analogRead(JOY_Y_PIN);
+        if(i==125 || i==250 || i==375){
+            tft.print(F("."));
+            delay(500);
+        }
+    }
+    joystick.upper_y /= 500;
+    tft.setTextColor(ILI9341_DARKGREEN);
+    tft.print(F("Done"));
+    delay(1000);
+    tft.fillRect(tftWidth / 2 - 100, tftHeight / 2 - 20, 200, 40, ILI9341_BLACK);
+
+    // Lower_Y
+    joystick.lower_y = 0;
+    tft.setCursor(tftWidth / 2 - 100 + 25, tftHeight / 2 - 20 + 12);
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.print(F("Lower Y"));
+    while(digitalRead(START_PIN));
+    for(int16_t i=0 ; i<500 ; i++){
+        joystick.lower_y += analogRead(JOY_Y_PIN);
+        if(i==125 || i==250 || i==375){
+            tft.print(F("."));
+            delay(500);
+        }
+    }
+    joystick.lower_y /= 500;
+    tft.setTextColor(ILI9341_DARKGREEN);
+    tft.print(F("Done"));
+    delay(1000);
+    tft.fillRect(tftWidth / 2 - 100, tftHeight / 2 - 20, 200, 40, ILI9341_BLACK);
+    #if (DEBUG)
+    Serial.print(F("CX: ")); Serial.println(joystick.cen_x);
+    Serial.print(F("CY: ")); Serial.println(joystick.cen_y);
+    Serial.print(F("RX: ")); Serial.println(joystick.right_x);
+    Serial.print(F("LX: ")); Serial.println(joystick.left_x);
+    Serial.print(F("UY: ")); Serial.println(joystick.upper_y);
+    Serial.print(F("DY: ")); Serial.println(joystick.lower_y);
+    #endif
+}
+
+double getJoy(double delta_x) {
+    double x = analogRead(JOY_X_PIN);
+    if(x < joystick.cen_x - 100){   //RIGHT
+        x = (delta_x * (x - joystick.cen_x)) / (joystick.right_x - joystick.cen_x);
+        return x;
+    }else if(x > joystick.cen_x + 100){ //LEFT
+        x = -(delta_x * (x - joystick.cen_x)) / (joystick.left_x - joystick.cen_x);
+        return x;
+    }
+    return 0;
+}
+boolean selectPressed(boolean& pre_sel)
+{
+    boolean now_sel = digitalRead(SELECT_PIN);
+    if(pre_sel && (!now_sel)){ // falling
+        pre_sel = now_sel;
+        return true;
+    }
+    else{
+        pre_sel = now_sel;
+        return false;
+    }
+}
+
+void moveBat() {
+  bat.vel_x = (int8_t) getJoy(5.0);
+  if (fabs(bat.vel_x) > 0) {
+    bat.cur_x += bat.vel_x;
+    if (bat.cur_x < 0)
+        bat.cur_x = 0;
+    if (bat.cur_x >= (tftWidth - bat.width))
+        bat.cur_x = tftWidth - 1 - bat.width;
   }
+}
+void drawBat()
+{
+    tft.fillRect(bat.old_x, bat.old_y, bat.width, bat.height, ILI9341_BLACK);
+    tft.fillRect(bat.cur_x, bat.cur_y, bat.width, bat.height, ILI9341_RED);
+    bat.old_x = bat.cur_x;
+    bat.old_y = bat.cur_y;
+}
 
-  tft.fillScreen(ILI9341_BLACK);
-  
-  tft.setCursor((tftWidth/2)-100+20/*-25*/,(tftHeight/2)-20+12);
-  tft.setTextSize(2);
-  tft.setTextColor(ILI9341_WHITE);
-  tft.print("Calibrating...");
-  
-  Serial.println("Calibrating...");
-
-  //orientation
-  joyOrien[0] = (analogRead(joy_x)-x_cen<0) ? 1 : -1;
-  joyOrien[1] = (analogRead(joy_y)-y_cen>0) ? 1 : -1;
-  
-  Serial.print("result: ");
-  for(int i=0;i<2;i++)
-  {
-    Serial.print(joyOrien[i]);
-    Serial.print(" ");
-  }
-  Serial.println("");
-  Serial.println("orientation done");
-  
-  //scaling
-  double old_t;
-  old_t = 1;
-  double a,b;
-  a = b = 0;
-  Serial.println("Start rolling");
-  do
-  {
-    double a = analogRead(joy_x)-x_cen;
-    a *= joyOrien[0];
-    double b = analogRead(joy_y)-y_cen;
-    b *= joyOrien[1];
-    old_t = atan2(b,a);
-    Serial.print(a);
-    Serial.print(" ");
-    Serial.println(b);
-    Serial.println(old_t);
-    //delay(500);
-  }while((old_t>0)/*||(fabs(a)<200)||(fabs(b)<200)*/);
-  Serial.println("Start sampling");
-
-  bool first_Angle = true;
-  bool sampling = true;
-  while(sampling)
-  {
-    double newX = analogRead(joy_x)-x_cen;
-    double newY = analogRead(joy_y)-y_cen;
-    newX *= joyOrien[0];
-    newY *= joyOrien[1];
-    double t = atan2(newY,newX);
-
-    Serial.print(newX);
-    Serial.print(" ");
-    Serial.println(newY);
-    Serial.print("old angle: ");
-    Serial.println(old_t*180.0/M_PI);
-    Serial.print("angle: ");
-    Serial.println(t*180.0/M_PI);
-    Serial.print("first angle: ");
-    Serial.println(first_Angle);
-    //delay(300);
-
-    if((!first_Angle)&&(old_t>=0)&&(t<0))
+int checkCollision()
+{
+    // bounding box collision detection
+    /* hit bound */
+    if (ball.cur_x < ball.radius + 1){ // hit right bound
+        ball.cur_x = ball.radius + 1;
+        ball.vel_x = -ball.vel_x;
+        return 0;
+    }
+    if (ball.cur_x > tftWidth - ball.radius - 1){ // hit left bound
+        ball.cur_x = tftWidth - ball.radius - 1;
+        ball.vel_x = -ball.vel_x;
+        return 0;
+    }
+    if (ball.cur_y < topBorder + ball.radius + 1){ // hit the upper bound
+        ball.cur_y = topBorder + ball.radius + 1;
+        ball.vel_y = -ball.vel_y;
+        return 0;
+    }
+    
+    if (ball.cur_y > tftHeight - ball.radius){ // hit the lower bound (Lost one life)
+        ball.cur_y = tftHeight - ball.radius;
+        ball.vel_x = 0; 
+        ball.vel_y = 0;
+        player.lives--;
+        drawLives();
+        return 1;
+    }
+    /* hit Bat */
+    // 1. Can modify ball direction/speed  
+    // 2. Here just hit bat or not, can check it more detail
+    //    (ex: hit bat upper/lower/right/left bound)
+    if( (ball.cur_x > bat.cur_x - ball.radius - 1) && (ball.cur_x < bat.cur_x + bat.width  + ball.radius + 1) &&
+        (ball.cur_y > bat.cur_y - ball.radius - 1) && (ball.cur_y < bat.cur_y + bat.height + ball.radius + 1) )
     {
-      sampling = false;
-      Serial.println("End point");
-      continue;
+        if(!mute)
+            tone(BUZZER_PIN, 200, 70);
+        ball.cur_y = bat.cur_y - ball.radius -1;
+        ball.vel_x += 2.0 * (ball.cur_x - bat.cur_x + bat.width / 2.0) / bat.width; // use hit position increase ball.vel_x
+        ball.vel_y = -(ball.vel_y + 0.001); // increase ball.vel_y
+        return 2;
     }
 
-    if(first_Angle)
-      first_Angle = false;
-
-    if(newX>joyExt[0][0])
-      joyExt[0][0] = /*xValMax/*/newX;
-    if(newX<joyExt[0][1])
-      joyExt[0][1] = /*xValMax/*/newX;
-    if(newY>joyExt[1][0])
-      joyExt[1][0] = /*yValMax/*/newY;
-    if(newY<joyExt[1][1])
-      joyExt[1][1] = /*yValMax/*/newY;
-    old_t = t;
-  }
-  for(int i=0;i<2;i++)
-  {
-    for(int j=0;j<2;j++)
-    {
-      Serial.print(joyExt[i][j]);
-      Serial.print(" ");
+    /* hit Block */
+    // 1. Here check all blocks each time, can use other efficient method
+    // 2. Here just hit block or not, can check it more detail
+    //    (ex: hit block upper/lower/right/left bound) 
+    for(int8_t row=0 ; row<5 ; row++){
+        for(int8_t col=0 ; col<16 ; col++){
+            if (blocks[row][col].isActive){
+                int16_t x1 = blocks[row][col].x - ball.radius;
+                int16_t x2 = blocks[row][col].x;
+                int16_t x3 = blocks[row][col].x + blocks[row][col].width;
+                int16_t x4 = blocks[row][col].x + blocks[row][col].width + ball.radius;
+                int16_t y1 = blocks[row][col].y - ball.radius;
+                int16_t y2 = blocks[row][col].y;
+                int16_t y3 = blocks[row][col].y + blocks[row][col].height;
+                int16_t y4 = blocks[row][col].y + blocks[row][col].height + ball.radius;
+                if(ball.cur_y > y2 && ball.cur_y < y3)
+                {
+                    if((ball.cur_x > x1 - 1 && ball.cur_x < x2 + 1)
+                    || (ball.cur_x > x3 - 1 && ball.cur_x < x4 + 1))
+                    {
+                        if(!mute)
+                            tone(BUZZER_PIN, 1500, 70);                        
+                        ball.cur_x -= ball.vel_x;
+                        ball.cur_y -= ball.vel_y;
+                        blocks[row][col].removeBlock();
+                        player.score += blocks[row][col].score;
+                        drawScore();
+                        ball.vel_x = -ball.vel_x;
+                        return 3;
+                    }
+                }
+                if(ball.cur_x > x2 && ball.cur_x < x3)
+                {
+                    if((ball.cur_y > y1 - 1 && ball.cur_y < y2 + 1)
+                    || (ball.cur_y > y3 - 1 && ball.cur_y < y4 + 1))
+                    {
+                        if(!mute)
+                            tone(BUZZER_PIN, 1500, 70);
+                        ball.cur_x -= ball.vel_x;
+                        ball.cur_y -= ball.vel_y;
+                        blocks[row][col].removeBlock();
+                        player.score += blocks[row][col].score;
+                        drawScore();
+                        ball.vel_y = -ball.vel_y;
+                        return 3;
+                    }
+                }
+            }
+        }
     }
-  }
-  Serial.println("");
-  Serial.println("sampling done");
-  tft.fillRect((tftWidth/2)-100-30,(tftHeight/2)-20,280,40,ILI9341_BLACK);
-}
-
-double getJoy(double max_deltaX)
-{
-  double x = analogRead(joy_x)-joyCen[0];
-  x *= joyOrien[0];
-  x *= max_deltaX/((x>0) ? joyExt[0][0] : -joyExt[0][1]);
-  return x;
-}
-
-bool prevSelect = true;
-bool selectPressed()
-{
-  bool val = digitalRead(select);
-  
-  if(prevSelect&&(!val))
-  {
-    prevSelect = val;
-    return true;
-  }
-  else
-  {
-    prevSelect = val;
-    return false;
-  }
-}
-
-void moveBat(){
-int16_t newBatX;
-double max_deltaX = 3;
-//ScreenPoint sp = ScreenPoint(0,0);
-double joy_input=getJoy(max_deltaX);
-//Serial.println(joy_input);
-if (fabs(joy_input)>0) {
-//TS_Point p = ts.getPoint();
-//sp = getScreenCoords(p.x, p.y);
-  newBatX = batX + joy_input;
-  if (newBatX < 0)
-    newBatX = 0;
-  if (newBatX >= (tftWidth - batWidth))
-    newBatX = tftWidth - 1 - batWidth;
-}
-
-/*if (ts.touched()) {
-  TS_Point p = ts.getPoint();
-  sp = getScreenCoords(p.x, p.y);
-  newBatX = sp.x - (batWidth / 2);
-  if (newBatX < 0) 
-    newBatX = 0;
-  if (newBatX >= (tftWidth - batWidth))
-    newBatX = tftWidth - 1 - batWidth;
-}*/
-
-if (abs(newBatX - batX) > 1){
-tft.fillRect(batX, batY, batWidth, batHeight,ILI9341_BLACK);
-batX = newBatX;
-tft.fillRect(batX, batY, batWidth, batHeight,ILI9341_RED);
-}
-}
-
-// bounding box collision detection
-boolean checkCollision(int x1, int y1, int width1, int height1, int x2, int y2, int width2, int height2){
-boolean hit = false;
-if (
-(((x2 + width2) >= x1) && (x2 <= (x1 + width1)))
-&& (((y2 + height2) >= y1) && (y2 <= (y1 + height1)))
-) {
-hit = true;
-}
-
-return hit;
-}
-
-void checkHitBat(){
-// check bat and bottom half of ball
-float xInc;
-boolean hit = checkCollision(batX, batY, batWidth, batHeight, (int)round(xPos)-ballSize, (int)round(yPos), ballSize*2, ballSize);
-if (hit) {
-// reverse ball y direction but increase speed
-if(!mute)
-  tone(buzzerin,200,70);
-yVel += 0.001;
-if (yVel > 2){
-yVel = 2;
-}
-yVel = -yVel;
-// rounded bounce
-xInc = (xPos - (float)(batX + (batWidth / 2))) / (float)batWidth;
-xVel += 2 * xInc;
-if (abs(xVel) > 2){
-if (xVel < 0) {
-xVel = -2;
-}
-else {
-xVel = 2;
-}
-}
-// make sure ball not hitting bat
-yPos = (float)(batY - ballSize -1);
-}
-}
-
-void checkHitBlock(){
-int row, col;
-for (row=0; row<5/*&lt;5*/; row++){
-for (col=0; col<16/*&lt;16*/; col++){
-if (blocks[row][col].isActive && blocks[row][col].isHit(xPos,yPos, ballSize*2,ballSize*2)){
-if(!mute)
-  tone(buzzerin,1500,70);
-//delay();
-blocks[row][col].removeBlock();
-playerScore += blocks[row][col].score;
-drawScore();
-yVel = -yVel;
-return;
-}
-}
-}
+    return 0;
 }
 
 boolean checkAllBlocksHit(){
-int row, col, actives;
-actives = 0;
-for (row=0; row<5; row++){
-for (col=0; col<16; col++){
-if (blocks[row][col].isActive){
-return false;
-}
-}
-}
-
-return true; 
+    int8_t row, col;
+    for (row=0 ; row<5 ; row++){
+        for (col=0 ; col<16 ; col++){
+            if (blocks[row][col].isActive){
+                return false;
+            }
+        }
+    }
+    return true; 
 }
 
+
+void setup() {
+    Serial.begin(9600);
+    /* I/O SETTING */
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
+    // avoid chip select contention
+    pinMode(TS_CS , OUTPUT); digitalWrite(TS_CS , HIGH);
+    pinMode(TFT_CS, OUTPUT); digitalWrite(TFT_CS, HIGH);
+
+    pinMode(JOY_X_PIN, INPUT);
+    pinMode(JOY_Y_PIN, INPUT);
+    pinMode(START_PIN , INPUT_PULLUP);
+    pinMode(SELECT_PIN, INPUT_PULLUP);
+
+    tft.begin();
+    tft.setRotation(ROTATION);
+    tft.fillScreen(ILI9341_BLACK);
+    tftWidth = tft.width();
+    tftHeight = tft.height();
+    
+    joyCali();
+}
+
+/* GAME STATE */
+#define GAME_START 1
+#define GAME_INIT 2
+#define GAME_STOP 4
+#define GAME_PLAY 5
+#define GAME_RELOAD 6
+#define GAME_OVER 7
+int gameState = GAME_START; // 1=start 2=playing 3=gameover
 unsigned long lastFrame = millis();
+int collision;
 
 void loop(void) {
+    /* Limit frame rate */
+    while((millis() - lastFrame) < 16);// limit FPS<100
+    lastFrame = millis();
 
-// limit frame rate
-while((millis() - lastFrame) < 10);
-lastFrame = millis();
+    /* Buzzer & LED control */
+    if(selectPressed(pre_sel)) //mute mode
+        mute = !mute;
+    if(mute)
+        digitalWrite(LED_PIN, HIGH);
+    else
+        digitalWrite(LED_PIN, LOW);
+    
+    /* Game STATE */
+    switch(gameState){
+    case GAME_START: // show "start" on tft & wait player press "start"
+        tft.fillRect ((tftWidth/2)-100, (tftHeight/2)-20, 200, 40, ILI9341_GREEN);
+        tft.setCursor((tftWidth/2)-100+25, (tftHeight/2)-20+12);
+        tft.setTextSize(2);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print(F("Press \"start\""));
+        gameState = GAME_INIT;
+        break;
+    case GAME_INIT: //
+       if (!digitalRead(START_PIN)){
+            tft.fillScreen(ILI9341_BLACK);
+            initInfoBoard();
+            initGameBoard();
+            gameState = GAME_STOP;
+        }
+        break;
+    case GAME_STOP:
+        if (!digitalRead(START_PIN)){
+            gameState = GAME_PLAY;
+        }
+        moveBat();
+        drawBat(); 
+        break;
+    case GAME_PLAY:
+        moveBall();
+        moveBat();
+        collision = checkCollision();
+        if(collision == 1){
+            if(player.lives > 0){
+                newBall();
+                gameState = GAME_STOP;
+            }else{
+                gameState = GAME_OVER;
+            }
+        }
+        if(checkAllBlocksHit()){
+            gameState = GAME_RELOAD;
+        }
+        drawBall();
+        drawBat();
+        break;
+    case GAME_RELOAD: // new blocks
+        delay(1000);
+        player.level++;
+        drawLevel();
+        initGameBoard();
+        gameState = GAME_STOP;
+        break;
 
-if(selectPressed())
-  mute = !mute;
-
-if(!mute)
-  digitalWrite(LED,HIGH);
-else
-  digitalWrite(LED,LOW);
-
-switch(gameState){
-case 1: // start
-gameState = 11;
-break;
-
-case 11: // click to play
-tft.fillRect((tftWidth/2)-100,(tftHeight/2)-20,200,40,ILI9341_GREEN);
-tft.setCursor((tftWidth/2)-100+25,(tftHeight/2)-20+12);
-tft.setTextSize(2);
-tft.setTextColor(ILI9341_WHITE);
-tft.print("Press \"start\"");
-gameState = 12;
-break;
-
-case 12: // wait for click to play
-/*if (ts.touched()!digitalRead(start)) {
-TS_Point p = ts.getPoint();
-ScreenPoint sp = getScreenCoords(p.x, p.y);*/
-if (!digitalRead(start)/*checkCollision(sp.x, sp.y,1,1,(tftWidth/2)-50,(tftHeight/2)-20,100,40)*/){
-initGame();
-gameState = 2;
-}
-//}
-break;
-
-case 2: // play
-/*Serial.print(xPos);
-Serial.print(" ");
-Serial.println(yPos);*/
-if(selectPressed())
-  mute = !mute;
-moveBall(xPos,yPos,xVel,yVel,xPosLast,yPosLast);
-moveBat();
-checkHitBat();
-checkHitBlock();
-if (checkBallLost()){
-//tft.fillCircle(round(xPos), round(yPos), ballSize, ILI9341_BLACK);
-tft.fillCircle(round(xPosLast), round(yPosLast), ballSize, ILI9341_BLACK);
-playerLives --;
-drawLives();
-if (playerLives > 0){
-newBall();
-xVel=1;
-yVel=1 + 0.7*(level);
-}
-else {
-gameState = 3; // end game
-}
-}
-
-if (checkAllBlocksHit()){
-gameState = 4;
-}
-
-break;
-
-case 4: // new blocks
-delay(1000);
-level ++;
-drawLevel();
-initGameBoard();
-break;
-
-case 3: // end
-tft.fillScreen(ILI9341_BLACK);
-tft.setCursor((tftWidth/2)-150,50);
-tft.setTextSize(3);
-tft.setTextColor(ILI9341_WHITE);
-tft.print("You Scored ");
-tft.print(playerScore);
-gameState = 11; // click to play
-break;
-}
+    case GAME_OVER: // end
+        tft.fillScreen(ILI9341_BLACK);
+        tft.setCursor((tftWidth/2)-150,50);
+        tft.setTextSize(3);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print(F("You Scored "));
+        // tft.print(playerScore);
+        // if (!digitalRead(START_PIN)){
+        //     gameState = GAME_START; // click start to play
+        // }
+        break;
+    }
 }
